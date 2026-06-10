@@ -4,8 +4,7 @@ config_file=.gitmono
 config_group=mono
 mods_file=.gitmods
 
-root_tag=root
-mono_root_tag="${config_group}/root"
+root_tag=v0.0.0
 
 
 # check if the repo has any commits yet
@@ -188,7 +187,7 @@ _create_module_branch () {
   local root=${2:-$(_get_default_root)}
   local branch
   branch=$(_get_module_branch_name "$name" "$root")
-  git checkout --orphan "$branch" "$mono_root_tag"
+  git checkout --orphan "$branch" "$root_tag"
   _root_commit_tag "$root/$name/$root_tag"
 }
 
@@ -346,7 +345,7 @@ mono_init () {
 
   _make_config "${config_args[@]}"
 
-  _root_commit_tag "$mono_root_tag"
+  _root_commit_tag "$root_tag"
   mono_config "$config_group.base" "$(_get_base_branch)"
 }
 
@@ -401,6 +400,95 @@ mono_module_add () {
 
 mono_module_remove () {
   echo "module remove not implemented yet"
+}
+
+# ---- clone ----
+
+_usage_clone () {
+  echo "Usage: mono clone" >&2
+}
+
+mono_clone () {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h)
+        _usage_clone
+        return 0
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+
+  local top
+  top=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    echo "Error: not inside a git repository." >&2
+    return 1
+  }
+  cd "$top"
+
+  if [[ ! -f .gitmodules ]]; then
+    echo "Nothing to clone \u2014 no submodules configured."
+    return 0
+  fi
+
+  # Initialize and check out all submodules
+  git submodule update --init --recursive
+
+  # Delegate to setup for alternates + branch checkout
+  mono_setup
+}
+
+# ---- setup ----
+
+_usage_setup () {
+  echo "Usage: mono setup" >&2
+}
+
+# Walk all registered submodules and prepare them for development.
+# Safe to re-run anytime — idempotent.
+mono_setup () {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h)
+        _usage_setup
+        return 0
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+
+  local top
+  top=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    echo "Error: not inside a git repository." >&2
+    return 1
+  }
+  cd "$top"
+
+  if [[ ! -f .gitmodules ]]; then
+    return 0
+  fi
+
+  local paths
+  paths=$(git --no-pager config --file .gitmodules --get-regexp path | awk '{print $2}')
+  local path
+  for path in $paths; do
+    local root="${path%%/*}"
+    local name="${path#*/}"
+
+    # Regenerate alternates (idempotent)
+    _setup_alternates "$name" "$root"
+
+    # Switch submodule from detached HEAD to its tracked branch
+    local branch
+    branch=$(git --no-pager config --file .gitmodules --get "submodule.$path.branch" 2>/dev/null) || true
+    if [[ -n "$branch" ]] && [[ -d "$path" ]]; then
+      git -C "$path" checkout -B "$branch" HEAD >/dev/null 2>&1 || true
+    fi
+  done
 }
 
 # ---- module resolution ----
@@ -628,6 +716,12 @@ main () {
     ;;
     module)
       mono_module "$@"
+    ;;
+    clone)
+      mono_clone "$@"
+    ;;
+    setup)
+      mono_setup "$@"
     ;;
   esac
 }

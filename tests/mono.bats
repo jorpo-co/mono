@@ -141,7 +141,7 @@ _init_repo() {
   run git show-ref --verify refs/heads/modules/auth/main
   [ "$status" -eq 0 ]
 
-  run git show-ref --verify refs/tags/modules/auth/root
+  run git show-ref --verify refs/tags/modules/auth/v0.0.0
   [ "$status" -eq 0 ]
 }
 
@@ -527,6 +527,184 @@ _init_repo() {
 }
 
 
+# ---- clone ----
+
+@test "clone with no modules succeeds" {
+  _init_repo
+  run "$MONO" clone
+  [ "$status" -eq 0 ]
+}
+
+@test "clone --help prints usage" {
+  _init_repo
+  run "$MONO" clone --help
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Usage:" ]]
+}
+
+@test "clone checks out submodules and sets up alternates" {
+  cd "$TMPDIR"
+  rm -rf source
+  git init --bare source.git >/dev/null 2>&1
+  git clone source.git source >/dev/null 2>&1
+  cd source
+  "$MONO" init >/dev/null 2>&1
+  "$MONO" module add auth >/dev/null 2>&1
+  echo "data" > modules/auth/x.txt
+  cd modules/auth
+  git add x.txt
+  git commit -m "feat" >/dev/null 2>&1
+  cd ../..
+  "$MONO" module tag modules/auth v1.0.0 >/dev/null 2>&1
+
+  # Push everything
+  git push origin main 2>/dev/null
+  git push origin modules/auth/main 2>/dev/null
+  git push origin --tags 2>/dev/null
+
+  # Clone fresh and run mono clone
+  cd "$TMPDIR"
+  rm -rf fresh
+  git clone source.git fresh >/dev/null 2>&1
+  cd fresh
+
+  run "$MONO" clone
+  [ "$status" -eq 0 ]
+
+  # Submodule checked out
+  [ -f modules/auth/x.txt ]
+
+  # Alternates set up
+  run cat .git/objects/info/alternates
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "modules/auth/objects" ]]
+}
+
+# ---- setup ----
+
+@test "setup --help prints usage" {
+  _init_repo
+  run "$MONO" setup --help
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Usage:" ]]
+}
+
+@test "setup with no submodules succeeds" {
+  _init_repo
+  run "$MONO" setup
+  [ "$status" -eq 0 ]
+}
+
+@test "setup switches submodule to tracked branch after clone" {
+  cd "$TMPDIR"
+  rm -rf source
+  git init --bare source.git >/dev/null 2>&1
+  git clone source.git source >/dev/null 2>&1
+  cd source
+  "$MONO" init >/dev/null 2>&1
+  "$MONO" module add auth >/dev/null 2>&1
+  cd modules/auth
+  echo "data" > x.txt
+  git add x.txt
+  git commit -m "feat" >/dev/null 2>&1
+  cd ../..
+  "$MONO" module tag modules/auth v1.0.0 >/dev/null 2>&1
+  git push origin main 2>/dev/null
+  git push origin modules/auth/main 2>/dev/null
+  git push origin --tags 2>/dev/null
+
+  # Clone fresh — submodule will be in detached HEAD
+  cd "$TMPDIR"
+  rm -rf fresh
+  git clone source.git fresh >/dev/null 2>&1
+  cd fresh
+  git submodule update --init --recursive >/dev/null 2>&1
+
+  # Verify detached HEAD before setup
+  cd modules/auth
+  run git symbolic-ref HEAD
+  [ "$status" -ne 0 ]
+  cd ../..
+
+  # Run setup
+  run "$MONO" setup
+  [ "$status" -eq 0 ]
+
+  # Verify submodule is now on its tracked branch
+  cd modules/auth
+  run git symbolic-ref HEAD
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "modules/auth/main" ]]
+}
+
+@test "setup is idempotent" {
+  cd "$TMPDIR"
+  rm -rf source
+  git init --bare source.git >/dev/null 2>&1
+  git clone source.git source >/dev/null 2>&1
+  cd source
+  "$MONO" init >/dev/null 2>&1
+  "$MONO" module add auth >/dev/null 2>&1
+  cd modules/auth
+  echo "data" > x.txt
+  git add x.txt
+  git commit -m "feat" >/dev/null 2>&1
+  cd ../..
+  "$MONO" module tag modules/auth v1.0.0 >/dev/null 2>&1
+  git push origin main 2>/dev/null
+  git push origin modules/auth/main 2>/dev/null
+  git push origin --tags 2>/dev/null
+
+  cd "$TMPDIR"
+  rm -rf fresh
+  git clone source.git fresh >/dev/null 2>&1
+  cd fresh
+  git submodule update --init --recursive >/dev/null 2>&1
+
+  # Run setup twice
+  "$MONO" setup >/dev/null 2>&1
+  run "$MONO" setup
+  [ "$status" -eq 0 ]
+
+  # Still on tracked branch after second run
+  cd modules/auth
+  run git symbolic-ref HEAD
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "modules/auth/main" ]]
+}
+
+@test "clone delegates to setup (branch checkout)" {
+  cd "$TMPDIR"
+  rm -rf source
+  git init --bare source.git >/dev/null 2>&1
+  git clone source.git source >/dev/null 2>&1
+  cd source
+  "$MONO" init >/dev/null 2>&1
+  "$MONO" module add auth >/dev/null 2>&1
+  cd modules/auth
+  echo "data" > x.txt
+  git add x.txt
+  git commit -m "feat" >/dev/null 2>&1
+  cd ../..
+  "$MONO" module tag modules/auth v1.0.0 >/dev/null 2>&1
+  git push origin main 2>/dev/null
+  git push origin modules/auth/main 2>/dev/null
+  git push origin --tags 2>/dev/null
+
+  cd "$TMPDIR"
+  rm -rf fresh
+  git clone source.git fresh >/dev/null 2>&1
+  cd fresh
+
+  # mono clone should leave submodule on tracked branch (not detached)
+  "$MONO" clone >/dev/null 2>&1
+
+  cd modules/auth
+  run git symbolic-ref HEAD
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "modules/auth/main" ]]
+}
+
 # ---- Phase 1: cleanup - root tag, quoting, no auto-push, walk-up ----
 
 @test "no args prints usage to stderr" {
@@ -535,12 +713,12 @@ _init_repo() {
   [[ "$output" =~ "No arguments supplied" ]]
 }
 
-@test "init creates namespaced root tag" {
+@test "init creates v0.0.0 root tag" {
   cd "$TMPDIR"
   mkdir fresh && cd fresh
   git init >/dev/null 2>&1
   "$MONO" init >/dev/null 2>&1
-  run git rev-parse mono/root
+  run git rev-parse v0.0.0
   [ "$status" -eq 0 ]
 }
 
