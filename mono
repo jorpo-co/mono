@@ -1,0 +1,620 @@
+#!/bin/bash
+
+config_file=.gitmono
+config_group=mono
+mods_file=.gitmods
+
+root_tag=root
+
+
+# tests to see whether there is a repo at this location and it has commits or not
+_has_commits () {
+  [[ "$( git log --oneline -5 2>/dev/null | wc -l )" -eq 0 ]] && return 1 || return 0
+}
+
+# tests to see whether there is a monorepo config file at this location
+_has_config () {
+  [[ -f $config_file ]] && return 0 || return 1
+}
+
+# test whether a branch exists
+# $1 branch name to test
+_has_branch () {
+  git show-ref --quiet --verify "refs/heads/$1" 2>/dev/null
+}
+
+# get the base branch git has created
+_get_base_branch () {
+  git rev-parse --abbrev-ref HEAD
+}
+
+# ---- multi-root helpers ----
+
+# return roots list as space-separated string
+# handles backward compat with old single prefix
+_get_root_list () {
+  if _has_config; then
+    local roots
+    roots=$(mono_config "$config_group.roots" 2>/dev/null)
+    if [[ -n "$roots" ]]; then
+      echo "$roots" | tr ',' ' '
+    else
+      # backward compat: old prefix is a single root
+      local old_prefix
+      old_prefix=$(mono_config "$config_group.prefix" 2>/dev/null)
+      if [[ -n "$old_prefix" ]]; then
+        echo "$old_prefix"
+      fi
+    fi
+  fi
+}
+
+# get the default root name
+_get_default_root () {
+  if _has_config; then
+    local dr
+    dr=$(mono_config "$config_group.default-root" 2>/dev/null)
+    if [[ -n "$dr" ]]; then
+      echo "$dr"
+      return 0
+    fi
+
+    # backward compat: old prefix is the only root
+    local old_prefix
+    old_prefix=$(mono_config "$config_group.prefix" 2>/dev/null)
+    if [[ -n "$old_prefix" ]]; then
+      echo "$old_prefix"
+      return 0
+    fi
+
+    # fallback: first root from roots list
+    local roots
+    roots=$(_get_root_list)
+    if [[ -n "$roots" ]]; then
+      echo "$roots" | awk '{print $1}'
+    fi
+  fi
+}
+
+# validate a root name is in the configured roots list
+# $1 root name
+_validate_root () {
+  local target=$1
+  local roots
+  roots=$(_get_root_list)
+  local found=1
+  for r in $roots; do
+    if [[ "$r" == "$target" ]]; then
+      found=0
+      break
+    fi
+  done
+  return $found
+}
+
+# get a module branch name as a string
+# $1 the module name
+# $2 optional root name (default: _get_default_root)
+_get_module_branch_name () {
+  local name=$1
+  local root=${2:-$(_get_default_root)}
+  local base
+  base=$(mono_config "$config_group.base")
+  echo "$root/$name/$base"
+}
+
+# get the submodule path (directory) for a module
+# $1 the module name
+# $2 optional root name (default: _get_default_root)
+_get_module_path () {
+  local name=$1
+  local root=${2:-$(_get_default_root)}
+  echo "$root/$name"
+}
+
+# ---- init ----
+
+# make a monorepo config if it doesn't exist in this location
+# $@ optional --roots/-r flag and comma-separated root list
+_make_config () {
+  touch $config_file
+
+  if _has_config; then
+    local roots_arg=""
+    local default_root_arg=""
+
+    # parse optional roots and default-root from args
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --roots|-r)
+          roots_arg="$2"
+          shift 2
+          ;;
+        --default-root)
+          default_root_arg="$2"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+
+    if [[ -n "$roots_arg" ]]; then
+      mono_config "$config_group.roots" "$roots_arg"
+      if [[ -n "$default_root_arg" ]]; then
+        mono_config "$config_group.default-root" "$default_root_arg"
+      else
+        local first_root
+        first_root=$(echo "$roots_arg" | cut -d, -f1)
+        mono_config "$config_group.default-root" "$first_root"
+      fi
+    else
+      mono_config "$config_group.roots" "modules"
+      if [[ -n "$default_root_arg" ]]; then
+        mono_config "$config_group.default-root" "$default_root_arg"
+      else
+        mono_config "$config_group.default-root" "modules"
+      fi
+    fi
+  fi
+
+  return 0
+}
+
+# add the first root empty commit
+_first_commit () {
+  git commit --allow-empty -m 'Initial Commit'
+}
+
+# tag the first root empty commit
+# $1 the tag name to use
+_first_tag () {
+  git tag $1 -m 'Initial Tag'
+}
+
+
+_list_modules () {
+  if [[ -f .gitmodules ]]; then
+    GIT_PAGER=cat git config --file .gitmodules --get-regexp path | awk '{print $2}'
+  fi
+}
+
+# create a new branch for a submodule
+# $1 the module name
+# $2 optional root name (default: _get_default_root)
+_create_module_branch () {
+  local name=$1
+  local root=${2:-$(_get_default_root)}
+  local branch
+  branch=$(_get_module_branch_name "$name" "$root")
+  git checkout --orphan $branch $root_tag
+  _first_commit
+  _first_tag "$root/$name/$root_tag"
+}
+
+# set up bidirectional object store alternates between parent and submodule
+# $1 the module name
+# $2 optional root name (default: _get_default_root)
+_setup_alternates () {
+  local name=$1
+  local root=${2:-$(_get_default_root)}
+  local path
+  path=$(_get_module_path "$name" "$root")
+
+  local parent_alt=".git/objects/info/alternates"
+  local sub_alt=".git/modules/$path/objects/info/alternates"
+
+  # alternates paths are relative to the object store dir, not the info/ dir
+  # From .git/objects/ → .git/modules/<path>/objects
+  local sub_rel="../modules/$path/objects"
+
+  # From .git/modules/<path>/objects/ → .git/objects/
+  local parent_rel="../../../../objects"
+
+  mkdir -p "$(dirname "$parent_alt")"
+  mkdir -p "$(dirname "$sub_alt")"
+
+  if [[ -f "$parent_alt" ]]; then
+    if ! grep -sqF "$sub_rel" "$parent_alt" 2>/dev/null; then
+      echo "$sub_rel" >> "$parent_alt"
+    fi
+  else
+    echo "$sub_rel" > "$parent_alt"
+  fi
+
+  if [[ -f "$sub_alt" ]]; then
+    if ! grep -sqF "$parent_rel" "$sub_alt" 2>/dev/null; then
+      echo "$parent_rel" >> "$sub_alt"
+    fi
+  else
+    echo "$parent_rel" > "$sub_alt"
+  fi
+}
+
+# create a submodule
+# $1 the module name
+# $2 optional root name (default: _get_default_root)
+_create_real_module () {
+  local name=$1
+  local root=${2:-$(_get_default_root)}
+  local branch
+  branch=$(_get_module_branch_name "$name" "$root")
+  local path
+  path=$(_get_module_path "$name" "$root")
+  git submodule add -b $branch ./ ./$path
+  git submodule sync ./$path
+}
+
+# create a new submodule
+# $1 the module name
+# $2 optional root name (default: _get_default_root)
+_create_module () {
+  local name=$1
+  local root=${2:-$(_get_default_root)}
+  local branch
+  branch=$(_get_module_branch_name "$name" "$root")
+
+  if _has_branch "$branch"; then
+    echo "Error: module '$name' already exists in root '$root'" >&2
+    return 1
+  fi
+
+  _create_module_branch "$name" "$root"
+
+  # push module branch to origin so submodule clone can find it
+  git push origin "$branch:$branch" 2>/dev/null || true
+
+  git checkout "$(mono_config $config_group.base)"
+  _create_real_module "$name" "$root"
+  _setup_alternates "$name" "$root"
+  git push origin 2>/dev/null || true
+}
+
+_usage () {
+  echo "No arguments supplied" && exit 1
+}
+
+_usage_init () {
+  echo "Usage: mono init [--roots <csv> | -r <csv>] [--default-root <root>]"
+}
+
+_usage_module_add () {
+  echo "Usage: mono module add [-r <root>] <name>"
+  echo "       mono module add <root>/<name>"
+}
+
+_usage_module_tag () {
+  echo "Usage: mono module tag [-r <root>] <name> <semver>"
+  echo "       mono module tag <root>/<name> <semver>"
+}
+
+_usage_module_version () {
+  echo "Usage: mono module version [-r <root>] <name>"
+  echo "       mono module version <root>/<name>"
+}
+
+
+mono_init () {
+  _has_commits && return
+
+  git init
+
+  # collect --roots / -r and --default-root from args
+  local roots_arg=""
+  local default_root_arg=""
+  local parsed_args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --roots|-r)
+        roots_arg="$2"
+        shift 2
+        ;;
+      --default-root|-R)
+        default_root_arg="$2"
+        shift 2
+        ;;
+      --help|-h)
+        _usage_init
+        return 0
+        ;;
+      *)
+        parsed_args+=("$1")
+        shift
+        ;;
+    esac
+  done
+  set -- "${parsed_args[@]}"
+
+  local config_args=()
+  if [[ -n "$roots_arg" ]]; then
+    config_args+=(--roots "$roots_arg")
+  fi
+  if [[ -n "$default_root_arg" ]]; then
+    config_args+=(--default-root "$default_root_arg")
+  fi
+
+  _make_config "${config_args[@]}"
+
+  _first_commit
+  _first_tag $root_tag
+  mono_config "$config_group.base" "$(_get_base_branch)"
+}
+
+mono_config () {
+  git config -f $config_file $@
+}
+
+mono_config_root_list () {
+  _get_root_list
+}
+
+mono_config_default_root () {
+  _get_default_root
+}
+
+mono_module_add () {
+  local name=""
+  local flag_root=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --root|-r)
+        flag_root="$2"
+        shift 2
+        ;;
+      --help|-h)
+        _usage_module_add
+        return 0
+        ;;
+      *)
+        name="$1"
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$name" ]]; then
+    _usage_module_add
+    return 1
+  fi
+
+  local root name path
+  _resolve_module "$name" "$flag_root" || return 1
+
+  _validate_root "$root" || {
+    echo "Error: '$root' is not a configured root. Roots: $(_get_root_list)"
+    return 1
+  }
+
+  _create_module "$name" "$root"
+}
+
+mono_module_remove () {
+  echo "module remove not implemented yet"
+}
+
+# ---- module resolution ----
+
+# Resolve a module spec into root, name, and path variables.
+# Input forms:
+#   1. -r <root> <name>     -> explicit root flag
+#   2. <root>/<name>        -> path contains /
+#   3. <name>               -> bare name, uses default root
+# Sets: $root, $name, $path (or returns 1 on error)
+_resolve_module () {
+  local input_name=$1
+  local flag_root=$2
+
+  if [[ -n "$flag_root" ]]; then
+    if [[ "$input_name" == */* ]]; then
+      echo "Error: ambiguous -- use either -r <root> or <root>/<name>, not both" >&2
+      return 1
+    fi
+    root="$flag_root"
+    name="$input_name"
+  elif [[ "$input_name" == */* ]]; then
+    root="${input_name%%/*}"
+    name="${input_name#*/}"
+  else
+    root=$(_get_default_root)
+    name="$input_name"
+    if [[ -z "$root" ]]; then
+      echo "Error: no root configured and no default root. Run 'mono init' first." >&2
+      return 1
+    fi
+  fi
+
+  path="$root/$name"
+}
+
+mono_module_tag () {
+  local name=""
+  local version=""
+  local flag_root=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --root|-r)
+        flag_root="$2"
+        shift 2
+        ;;
+      --help|-h)
+        _usage_module_tag
+        return 0
+        ;;
+      *)
+        if [[ -z "$name" ]]; then
+          name="$1"
+        elif [[ -z "$version" ]]; then
+          version="$1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$name" || -z "$version" ]]; then
+    _usage_module_tag
+    return 1
+  fi
+
+  local root name path
+  _resolve_module "$name" "$flag_root" || return 1
+
+  _validate_root "$root" || {
+    echo "Error: '$root' is not a configured root. Roots: $(_get_root_list)"
+    return 1
+  }
+
+  local branch
+  branch=$(_get_module_branch_name "$name" "$root")
+  local sub_git=".git/modules/$path"
+
+  if [[ ! -d "$sub_git" ]]; then
+    echo "Error: module '$name' not found in root '$root'. Add it first with 'mono module add'."
+    return 1
+  fi
+
+  local sha
+  sha=$(git --git-dir="$sub_git" rev-parse HEAD 2>/dev/null) || {
+    echo "Error: cannot read HEAD of module '$name'"
+    return 1
+  }
+
+  _setup_alternates "$name" "$root"
+
+  if ! git update-ref "refs/heads/$branch" "$sha"; then
+    echo "Error: failed to update parent ref for module '$name'"
+    return 1
+  fi
+
+  local clean_version="${version#v}"
+  local tag="$root/$name/v$clean_version"
+  if ! git tag -m "$path v$clean_version" "$tag" "$sha"; then
+    echo "Error: failed to create tag '$tag'"
+    return 1
+  fi
+
+  git add "$path"
+  git commit -m "update $path to $version"
+
+  echo "Tagged $path as $tag ($sha)"
+}
+
+mono_module_version () {
+  local input_name=""
+  local flag_root=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --root|-r)
+        flag_root="$2"
+        shift 2
+        ;;
+      --help|-h)
+        _usage_module_version
+        return 0
+        ;;
+      *)
+        input_name="$1"
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$input_name" ]]; then
+    _usage_module_version
+    return 1
+  fi
+
+  local root name path
+  _resolve_module "$input_name" "$flag_root" || return 1
+
+  _validate_root "$root" || {
+    echo "Error: '$root' is not a configured root. Roots: $(_get_root_list)"
+    return 1
+  }
+
+  local sha
+  sha=$(git ls-tree HEAD "$path" 2>/dev/null | awk '{print $3}') || true
+
+  if [[ -z "$sha" ]]; then
+    echo "Error: module '$name' not found in current HEAD"
+    return 1
+  fi
+
+  _setup_alternates "$name" "$root"
+
+  local tag
+  tag=$(git tag --points-at "$sha" 2>/dev/null | grep "^$root/$name/" | head -1) || true
+
+  if [[ -z "$tag" ]]; then
+    echo "$sha (no tag)"
+  else
+    echo "$tag ($sha)"
+  fi
+}
+
+_check_repo_root () {
+  if [[ ! -f "$config_file" ]]; then
+    echo "Error: not at repo root. Run from the directory containing '$config_file'." >&2
+    return 1
+  fi
+}
+
+mono_module () {
+  test $# = 0 && _list_modules && return
+
+  _check_repo_root || return 1
+
+  cmd=$1
+  shift
+
+  case "$cmd" in
+    add)
+      mono_module_add $@
+    ;;
+    remove)
+      mono_module_remove $@
+    ;;
+    tag)
+      mono_module_tag $@
+    ;;
+    version)
+      mono_module_version $@
+    ;;
+  esac
+}
+
+# main command entrypoint
+main () {
+  test $# = 0 && _usage && return
+
+  cmd=$1
+  shift
+
+  case "$cmd" in
+    init)
+      mono_init $@
+    ;;
+    config)
+      local sub="$1"
+      if [[ "$sub" == "--root-list" ]]; then
+        mono_config_root_list
+      elif [[ "$sub" == "--default-root" ]]; then
+        mono_config_default_root
+      else
+        mono_config $@
+      fi
+    ;;
+    module)
+      mono_module $@
+    ;;
+  esac
+}
+
+# Only run main when executed directly, not sourced
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main $@
+fi
