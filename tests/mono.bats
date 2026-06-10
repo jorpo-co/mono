@@ -530,3 +530,47 @@ _init_repo() {
   [[ "$output" =~ "not at repo root" ]]
   cd ../..
 }
+
+
+# ---- multiple modules ----
+
+@test "adding two modules preserves both in .gitmodules" {
+  _init_repo --roots modules,libs
+  "$MONO" module add auth >/dev/null 2>&1
+  run "$MONO" module add -r libs strutils
+  [ "$status" -eq 0 ]
+
+  run git config --file .gitmodules --get-regexp path
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "modules/auth" ]]
+  [[ "$output" =~ "libs/strutils" ]]
+}
+
+
+@test "add 5 modules with mixed syntax preserves all entries" {
+  _init_repo --roots modules,libs,plugins
+  run "$MONO" module add modules/auth
+  [ "$status" -eq 0 ]
+  run "$MONO" module add -r libs strutils
+  [ "$status" -eq 0 ]
+  run "$MONO" module add plugins/slack
+  [ "$status" -eq 0 ]
+  run "$MONO" module add modules/api
+  [ "$status" -eq 0 ]
+  run "$MONO" module add libs/utils
+  [ "$status" -eq 0 ]
+
+  run git config --file .gitmodules --get-regexp path
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "modules/auth" ]]
+  [[ "$output" =~ "libs/strutils" ]]
+  [[ "$output" =~ "plugins/slack" ]]
+  [[ "$output" =~ "modules/api" ]]
+  [[ "$output" =~ "libs/utils" ]]
+
+  [ -f modules/auth/.git ]
+  [ -f libs/strutils/.git ]
+  [ -f plugins/slack/.git ]
+  [ -f modules/api/.git ]
+  [ -f libs/utils/.git ]
+}

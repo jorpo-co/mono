@@ -254,6 +254,8 @@ _create_module () {
   local root=${2:-$(_get_default_root)}
   local branch
   branch=$(_get_module_branch_name "$name" "$root")
+  local path
+  path=$(_get_module_path "$name" "$root")
 
   if _has_branch "$branch"; then
     echo "Error: module '$name' already exists in root '$root'" >&2
@@ -268,6 +270,13 @@ _create_module () {
   git checkout "$(mono_config $config_group.base)"
   _create_real_module "$name" "$root"
   _setup_alternates "$name" "$root"
+
+  # Commit submodule reference to main so it's durable
+  # (git submodule add stages but does not commit)
+  if ! git commit -m "add module $path" >/dev/null 2>&1; then
+    echo "Warning: could not commit module $path" >&2
+  fi
+
   git push origin 2>/dev/null || true
 }
 
