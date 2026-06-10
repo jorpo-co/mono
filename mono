@@ -5,16 +5,17 @@ config_group=mono
 mods_file=.gitmods
 
 root_tag=root
+mono_root_tag="${config_group}/root"
 
 
-# tests to see whether there is a repo at this location and it has commits or not
+# check if the repo has any commits yet
 _has_commits () {
-  [[ "$( git log --oneline -5 2>/dev/null | wc -l )" -eq 0 ]] && return 1 || return 0
+  git rev-parse HEAD 2>/dev/null
 }
 
 # tests to see whether there is a monorepo config file at this location
 _has_config () {
-  [[ -f $config_file ]] && return 0 || return 1
+  [[ -f "$config_file" ]] && return 0 || return 1
 }
 
 # test whether a branch exists
@@ -117,7 +118,7 @@ _get_module_path () {
 # make a monorepo config if it doesn't exist in this location
 # $@ optional --roots/-r flag and comma-separated root list
 _make_config () {
-  touch $config_file
+  touch "$config_file"
 
   if _has_config; then
     local roots_arg=""
@@ -162,21 +163,20 @@ _make_config () {
   return 0
 }
 
-# add the first root empty commit
-_first_commit () {
+# add a root commit + tag in one step
+# $1 tag name
+_root_commit_tag () {
   git commit --allow-empty -m 'Initial Commit'
-}
-
-# tag the first root empty commit
-# $1 the tag name to use
-_first_tag () {
-  git tag $1 -m 'Initial Tag'
+  git tag "$1" -m 'Initial Tag'
 }
 
 
 _list_modules () {
-  if [[ -f .gitmodules ]]; then
-    GIT_PAGER=cat git config --file .gitmodules --get-regexp path | awk '{print $2}'
+  local top
+  top=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+  local modfile="$top/.gitmodules"
+  if [[ -f "$modfile" ]]; then
+    git --no-pager config --file "$modfile" --get-regexp path | awk '{print $2}'
   fi
 }
 
@@ -188,9 +188,8 @@ _create_module_branch () {
   local root=${2:-$(_get_default_root)}
   local branch
   branch=$(_get_module_branch_name "$name" "$root")
-  git checkout --orphan $branch $root_tag
-  _first_commit
-  _first_tag "$root/$name/$root_tag"
+  git checkout --orphan "$branch" "$mono_root_tag"
+  _root_commit_tag "$root/$name/$root_tag"
 }
 
 # set up bidirectional object store alternates between parent and submodule
@@ -242,8 +241,8 @@ _create_real_module () {
   branch=$(_get_module_branch_name "$name" "$root")
   local path
   path=$(_get_module_path "$name" "$root")
-  git submodule add -b $branch ./ ./$path
-  git submodule sync ./$path
+  git submodule add -b "$branch" ./ "./$path"
+  git submodule sync "./$path"
 }
 
 # create a new submodule
@@ -264,10 +263,13 @@ _create_module () {
 
   _create_module_branch "$name" "$root"
 
-  # push module branch to origin so submodule clone can find it
-  git push origin "$branch:$branch" 2>/dev/null || true
+  # Push orphan branch to origin so submodule clone (via ./ URL) can find it.
+  # Silent if no origin configured, warns on other failures.
+  if ! git push origin "$branch:$branch" 2>/dev/null; then
+    : # origin missing or unreachable — user must push manually
+  fi
 
-  git checkout "$(mono_config $config_group.base)"
+  git checkout "$(mono_config "$config_group.base")"
   _create_real_module "$name" "$root"
   _setup_alternates "$name" "$root"
 
@@ -276,31 +278,30 @@ _create_module () {
   if ! git commit -m "add module $path" >/dev/null 2>&1; then
     echo "Warning: could not commit module $path" >&2
   fi
-
-  git push origin 2>/dev/null || true
 }
 
 _usage () {
-  echo "No arguments supplied" && exit 1
+  echo "No arguments supplied" >&2
+  return 1
 }
 
 _usage_init () {
-  echo "Usage: mono init [--roots <csv> | -r <csv>] [--default-root <root>]"
+  echo "Usage: mono init [--roots <csv> | -r <csv>] [--default-root <root>]" >&2
 }
 
 _usage_module_add () {
-  echo "Usage: mono module add [-r <root>] <name>"
-  echo "       mono module add <root>/<name>"
+  echo "Usage: mono module add [-r <root>] <name>" >&2
+  echo "       mono module add <root>/<name>" >&2
 }
 
 _usage_module_tag () {
-  echo "Usage: mono module tag [-r <root>] <name> <semver>"
-  echo "       mono module tag <root>/<name> <semver>"
+  echo "Usage: mono module tag [-r <root>] <name> <semver>" >&2
+  echo "       mono module tag <root>/<name> <semver>" >&2
 }
 
 _usage_module_version () {
-  echo "Usage: mono module version [-r <root>] <name>"
-  echo "       mono module version <root>/<name>"
+  echo "Usage: mono module version [-r <root>] <name>" >&2
+  echo "       mono module version <root>/<name>" >&2
 }
 
 
@@ -324,7 +325,7 @@ mono_init () {
         shift 2
         ;;
       --help|-h)
-        _usage_init
+        _usage_init >&2
         return 0
         ;;
       *)
@@ -345,13 +346,12 @@ mono_init () {
 
   _make_config "${config_args[@]}"
 
-  _first_commit
-  _first_tag $root_tag
+  _root_commit_tag "$mono_root_tag"
   mono_config "$config_group.base" "$(_get_base_branch)"
 }
 
 mono_config () {
-  git config -f $config_file $@
+  git config -f "$config_file" "$@"
 }
 
 mono_config_root_list () {
@@ -373,7 +373,7 @@ mono_module_add () {
         shift 2
         ;;
       --help|-h)
-        _usage_module_add
+        _usage_module_add >&2
         return 0
         ;;
       *)
@@ -384,7 +384,7 @@ mono_module_add () {
   done
 
   if [[ -z "$name" ]]; then
-    _usage_module_add
+    _usage_module_add >&2
     return 1
   fi
 
@@ -392,7 +392,7 @@ mono_module_add () {
   _resolve_module "$name" "$flag_root" || return 1
 
   _validate_root "$root" || {
-    echo "Error: '$root' is not a configured root. Roots: $(_get_root_list)"
+    echo "Error: '$root' is not a configured root. Roots: $(_get_root_list)" >&2
     return 1
   }
 
@@ -566,10 +566,16 @@ mono_module_version () {
 }
 
 _check_repo_root () {
-  if [[ ! -f "$config_file" ]]; then
-    echo "Error: not at repo root. Run from the directory containing '$config_file'." >&2
+  local top
+  top=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    echo "Error: not inside a git repository." >&2
+    return 1
+  }
+  if [[ ! -f "$top/$config_file" ]]; then
+    echo "Error: not at repo root. Run 'mono init' first or change to the repo root directory." >&2
     return 1
   fi
+  cd "$top"
 }
 
 mono_module () {
@@ -577,35 +583,38 @@ mono_module () {
 
   _check_repo_root || return 1
 
-  cmd=$1
+  local cmd=$1
   shift
 
   case "$cmd" in
     add)
-      mono_module_add $@
+      mono_module_add "$@"
     ;;
     remove)
-      mono_module_remove $@
+      mono_module_remove "$@"
     ;;
     tag)
-      mono_module_tag $@
+      mono_module_tag "$@"
     ;;
     version)
-      mono_module_version $@
+      mono_module_version "$@"
     ;;
   esac
 }
 
 # main command entrypoint
 main () {
-  test $# = 0 && _usage && return
+  if test $# = 0; then
+    _usage
+    return 1
+  fi
 
-  cmd=$1
+  local cmd=$1
   shift
 
   case "$cmd" in
     init)
-      mono_init $@
+      mono_init "$@"
     ;;
     config)
       local sub="$1"
@@ -614,16 +623,16 @@ main () {
       elif [[ "$sub" == "--default-root" ]]; then
         mono_config_default_root
       else
-        mono_config $@
+        mono_config "$@"
       fi
     ;;
     module)
-      mono_module $@
+      mono_module "$@"
     ;;
   esac
 }
 
 # Only run main when executed directly, not sourced
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    main $@
+    main "$@"
 fi

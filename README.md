@@ -1,67 +1,124 @@
 # mono — Git Submodule Monorepo Manager
 
-Lightweight bash script turning a plain Git repo into a monorepo using **submodules + orphan branches**. Zero deps beyond git.
+**mono** turns a plain Git repo into a monorepo using **submodules + orphan branches**. Zero deps beyond git.
 
-Git submodules work but admin is tedious. `mono` automates branch creation, submodule wiring, tagging, and version tracking.
+No separate remotes. No multi-repo orchestration. One repo, many module branches, all wired as submodules.
+
+---
+
+## Table of Contents
+
+- [Architecture](#architecture)
+- [Setup](#setup)
+- [Commands](#commands)
+  - [`init`](#init)
+  - [`config`](#config)
+  - [`module` (list)](#module-list)
+  - [`module add`](#module-add)
+  - [`module tag`](#module-tag)
+  - [`module version`](#module-version)
+  - [`module remove`](#module-remove)
+- [Module specification (three forms)](#module-specification-three-forms)
+- [Tag naming convention](#tag-naming-convention)
+- [Clone workflow](#clone-workflow)
+- [Requirements](#requirements)
+
+---
 
 ## Architecture
 
-Each module lives as an **orphan branch** sharing a root commit tag. The base branch (`main`) holds submodule pointers via `.gitmodules`. All refs (branches, tags) live in **one repo** — no separate remotes needed.
-
 ```
-repo root
-  └── tag: root  (empty commit, shared ancestor)
-        ├── main                              ← base branch (submodule pointers)
-        ├── modules/auth/main                 ← orphan branch, auth module's history
-        ├── modules/api/main                  ← orphan branch, api module's history
-        └── libs/strutils/main                ← orphan branch, lib's history
-
-.git/
-├── refs/heads/main                               ← base branch ref
-├── refs/heads/modules/auth/main                  ← auth orphan branch ref
-├── refs/tags/root                                ← shared ancestor tag
-├── refs/tags/modules/auth/root                   ← auth root tag
-├── refs/tags/modules/auth/v1.2.0                 ← auth version tag (annotated)
-└── modules/modules/auth/                         ← auth submodule git dir
-    ├── objects/                                  ← auth's own object store
-    └── objects/info/alternates                   ← points to parent objects
-```
-
-### Object store sharing
-
-Parent and submodules share object stores via **bidirectional alternates** (auto-configured on `module add`):
-
-```
-.git/objects/info/alternates:
-  ../modules/modules/auth/objects     ← parent sees auth's objects
-
-.git/modules/modules/auth/objects/info/alternates:
-  ../../../../objects                  ← auth sees parent's objects
+repo/
+├── main                            ← base branch, holds submodule pointers
+├── modules/auth/main               ← orphan branch, auth module's history
+├── modules/api/main                ← orphan branch, api module's history
+├── libs/strutils/main              ← orphan branch, lib's history
+│
+├── .git/
+│   ├── refs/heads/main
+│   ├── refs/heads/modules/auth/main
+│   ├── refs/tags/modules/auth/v1.2.0
+│   └── modules/modules/auth/       ← submodule git dir (clone of parent)
+│       ├── objects/                ← submodule's own object store
+│       └── objects/info/alternates ← link to parent objects
+│
+├── modules/auth/                   ← submodule working tree
+├── modules/api/
+└── libs/strutils/
 ```
 
-This allows the parent to create annotated tags pointing to submodule commits, and to resolve `git tag --points-at <sha>` across module boundaries.
+### Key concepts
 
-### Ref layout
+**Orphan branches.** Each module lives on an orphan branch (`<root>/<name>/main`) that shares no commit history with other branches. All branches live in the same repo — no separate remotes.
 
-| Kind | Pattern | Example |
-|---|---|---|
-| Module orphan branch | `<root>/<name>/<base>` | `modules/auth/main` |
-| Module root tag | `<root>/<name>/root` | `modules/auth/root` |
-| Module version tag | `<root>/<name>/v<semver>` | `modules/auth/v1.2.0` |
-| Parent root tag | `root` | `root` |
+**Submodules.** Modules are registered in `.gitmodules` with `git submodule add`. The URL is `./` (self-reference), so the submodule is a clone of the parent repo into `.git/modules/<path>/`.
+
+**Object sharing.** Parent and submodule share object stores via bidirectional alternates. This lets the parent create annotated tags pointing to submodule commits. Alternates are auto-configured on `module add`.
+
+**Prefixed refs.** Branches, tags, and directories all use the `<root>/<name>` prefix to avoid collisions between modules.
+
+## Design Rationale
+
+### Why submodules (not worktrees)
+
+**Version pinning requires gitlinks.** mono's core feature is that the parent repo records exactly which version of each module it depends on. Git submodules provide this natively via **gitlinks** — special tree entries in the parent commit that store a module's exact SHA. Run `git ls-tree HEAD modules/auth` and you get a pointer to a specific commit. Every checkout of that parent commit gets the same module version. Reproducible builds come for free.
+
+**Worktrees cannot pin.** `git worktree add modules/auth modules/auth/main` creates a checkout of the orphan branch, but the parent's tree has zero record of it. The worktree directory shows as untracked or an embedded repo. To pin versions with worktrees, you must reimplement gitlinks in a manifest file (`mono.lock`) — which is a worse, user-managed version of what submodules already do natively.
+
+**Worktrees don't survive clone.** Worktrees are local admin — `git clone` transfers branches and tags but not worktrees. Each clone requires `git worktree add` for every module. That's strictly more commands than `git submodule update --init --recursive`, which at least auto-creates directories from `.gitmodules`.
+
+**Embedded repo noise.** Each worktree inside the main tree has a `.git` file. Tools get confused, `git clean -dfx` nukes the worktree, `git status` shows untracked noise. Submodules are recognized by git and handled cleanly.
+
+### Why alternates (not direct `--git-dir` access)
+
+mono creates **annotated tags** in the parent namespace that point to submodule commits: `modules/auth/v1.2.0`. An annotated tag is a git object that must resolve the commit it points to. The commit object lives in the **submodule's object store** (`.git/modules/modules/auth/objects/`), not the parent's.
+
+Alternates tell the parent object store "if you don't find an object here, look over there." This is the standard git mechanism for object sharing (git itself uses it for submodule object stores). The alternative — routing every tag operation through `git --git-dir=.git/modules/modules/auth` — is fragile and doesn't compose with git commands that expect the parent's ref namespace.
+
+### Why orphan branches (not shared history)
+
+Each module gets its own orphan branch (`modules/auth/main`) starting from the `root` commit. This means:
+- No shared commit history between modules — `git log modules/auth/main` shows only auth commits
+- No merge conflicts between modules — branches diverge from commit 1
+- Modules can be garbage-collected independently
+- `git clone --single-branch modules/auth/main` fetches only that module's history
+
+### Why self-referencing URL (`./`)
+
+`git submodule add ./ ./modules/auth` tells git "the submodule source is this same repo." This means:
+- No separate remote to configure per module
+- All objects are already in one place (with alternates bridging stores)
+- One `git push` sends all data — main branch, all module branches, all tags
+- One `git clone` + alternates setup and everything is available
+
+### What mono does NOT solve
+
+- **No sandboxed filesystem per module.** Submodule working trees share the parent's filesystem. A module can access files outside its directory if given permission. This is a feature for shared config, not a bug.
+- **No partial clone.** `git clone` always fetches all branches and all objects. Use `--single-branch` + `--depth` if you need shallow clones.
+- **No CI isolation.** mono tracks versions but doesn't enforce build isolation. Each module's CI pipeline must be configured separately.
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `.gitmono` | Config: roots, default-root, base branch |
+| `.gitmodules` | Standard Git submodule declarations |
+
+---
 
 ## Setup
 
-Requires **fresh repo with no commits**.
+Requires a **fresh repo with no commits**:
 
 ```bash
-./mono init                                                # single root: modules
-./mono init --roots modules,libs,plugins                    # multiple roots
-./mono init -r libs,plugins                                 # shorthand
-./mono init --roots modules,libs --default-root libs        # custom default root
+./mono init                                                  # single root: modules
+./mono init --roots modules,libs,plugins                     # multiple roots
+./mono init -r libs,plugins                                  # shorthand
+./mono init --roots modules,libs --default-root libs          # custom default root
 ```
 
 Creates `.gitmono`:
+
 ```ini
 [mono]
   roots = modules,libs,plugins
@@ -69,174 +126,154 @@ Creates `.gitmono`:
   base = main
 ```
 
-Multiple roots (e.g. `modules`, `libs`, `plugins`) group modules by type. Each root gets its own branch prefix and submodule directory — same module name in different roots never collides.
+**Roots** are top-level directories that group modules by type. Each root gets its own branch prefix (`<root>/<name>/main`) and submodule directory (`<root>/<name>/`). Same module name in different roots never collides.
+
+**Default root** is used when a bare module name is given without an explicit root.
+
+---
 
 ## Commands
 
-| Command | Description |
-|---|---|
-| `init [--roots <csv> \| -r <csv>] [--default-root <root>]` | Init repo, empty commit + root tag |
-| `config <key> [value]` | Read/write `.gitmono` config |
-| `config --root-list` | List configured roots (space-separated) |
-| `config --default-root` | Show default root name |
-| `module` | List registered submodules (reads `.gitmodules`) |
-| `module add [-r <root>] <name>` | Create orphan branch + submodule + alternates |
-| `module add <root>/<name>` | (alt) Full path syntax |
-| `module tag [-r <root>] <name> <semver>` | Tag module version, update parent ref, pin in main |
-| `module version [-r <root>] <name>` | Show pinned version of module in current HEAD |
-| `module remove` | Not implemented yet |
+### `init`
 
-## Usage
+Initialize the repo as a monorepo.
 
-### Adding modules
-
-```bash
-# Bare name (uses default root → modules/auth)
-mono module add auth
-
-# Explicit root
-mono module add -r libs strutils
-
-# Full path
-mono module add libs/strutils
-
-# Ambiguous (-r AND path)
-mono module add -r modules modules/auth  # Error: ambiguous
+```
+mono init [--roots <csv> | -r <csv>] [--default-root <root>]
 ```
 
-Each module creates:
-- Orphan branch: `<root>/<name>/main`
-- Root tag: `<root>/<name>/root`
+Creates an empty root commit, tags it `root`, and writes `.gitmono`. If `--default-root` is omitted, the first root in the list becomes the default.
+
+### `config`
+
+Read or write `.gitmono` config.
+
+```
+mono config <key> [<value>]        # read or write a key
+mono config --root-list            # list configured roots
+mono config --default-root         # show default root name
+```
+
+Values are stored in git-config format under the `[mono]` section.
+
+### `module` (list)
+
+List registered submodules.
+
+```
+mono module
+```
+
+Prints one path per line (e.g. `modules/auth`, `libs/strutils`). Reads from `.gitmodules`.
+
+### `module add`
+
+Create a new module — orphan branch + submodule + alternates.
+
+```
+mono module add [-r <root>] <name>
+mono module add <root>/<name>
+```
+
+Creates:
+- Orphan branch `<root>/<name>/main` starting from `root` tag
+- Root tag `<root>/<name>/root`
 - Submodule at `<root>/<name>/`
 - Bidirectional alternates for object sharing
+- Commit on main recording the submodule addition
 
-### Tagging a module version
+**Errors:**
+- Module already exists (branch conflict)
+- Root not configured
+- Ambiguous: `-r` flag AND path both given
 
-Work inside the module, commit, then tag:
+### `module tag`
 
-```bash
-cd modules/auth
-# ... edit files ...
-git add -A
-git commit -m "feat: add JWT token validation"
-cd ../..
+Tag a module's current HEAD, update parent branch ref, pin in main.
+
+```
+mono module tag [-r <root>] <name> <semver>
+mono module tag <root>/<name> <semver>
 ```
 
-Three ways to specify the module:
+1. Reads submodule HEAD SHA (via `--git-dir`)
+2. Updates parent branch ref: `refs/heads/<root>/<name>/main` = SHA
+3. Creates annotated parent-level tag: `<root>/<name>/v<semver>`
+4. Pins submodule reference in main's tree and commits
+
+Version is normalized — leading `v` is stripped then re-added. Both `v1.2.0` and `1.2.0` produce tag `<root>/<name>/v1.2.0`.
+
+**Requires:** alternates (auto-setup on `module add`). If the module was added before this feature, alternates are regenerated automatically.
+
+**Errors:**
+- Module not found (not added via `module add`)
+- Root not configured or invalid
+- Ambiguous: `-r` flag AND path both given
+
+### `module version`
+
+Show the pinned version of a module in the current HEAD.
+
+```
+mono module version [-r <root>] <name>
+mono module version <root>/<name>
+```
+
+Reads the SHA pinned in main's tree (`git ls-tree HEAD <path>`), resolves it to a tag via `git tag --points-at`.
+
+Output: `<tag> (<sha>)` or `<sha> (no tag)` if the pinned commit isn't tagged.
+
+## Module specification (three forms)
+
+All module commands (`add`, `tag`, `version`) accept three forms:
 
 ```bash
-# 1. Bare name (resolves via default root)
+# 1. Bare name → uses default root
 mono module tag auth v1.2.0
+mono module version auth
 
-# 2. Explicit root flag
-mono module tag -r modules auth v1.2.0
+# 2. Explicit root via -r
 mono module tag -r libs strutils v0.5.1
+mono module add -r plugins slack
 
-# 3. Full path (split at /)
-mono module tag modules/auth v1.2.0
+# 3. Full path (split on first /)
 mono module tag libs/strutils v0.5.1
+mono module add plugins/slack
 
-# Error: -r and full path given together
+# Error: -r AND path both given
 mono module tag -r libs libs/strutils v1.0.0
 # → "Error: ambiguous"
 ```
 
-`mono module tag` does four things:
+The `_resolve_module` helper normalises all three into `root`, `name`, and `path`.
 
-1. Reads the submodule's current HEAD commit SHA (via `--git-dir`)
-2. Updates the parent's branch ref (`refs/heads/<root>/<name>/main`) to track the commit
-3. Creates an **annotated** parent-level tag (`<root>/<name>/v<semver>`)
-4. Pins the submodule reference in `main` and commits
+## Tag naming convention
 
-The version (`v1.2.0` or `1.2.0`) is normalized — a leading `v` is stripped then re-added. Both `mono module tag auth 1.2.0` and `mono module tag auth v1.2.0` produce tag `modules/auth/v1.2.0`.
+| Kind | Pattern | Example | Created by |
+|---|---|---|---|
+| Root tag | `root` | `root` | `mono init` |
+| Module root tag | `<root>/<name>/root` | `modules/auth/root` | `module add` |
+| Module version tag | `<root>/<name>/v<semver>` | `modules/auth/v1.2.0` | `module tag` |
+| Module orphan branch | `<root>/<name>/<base>` | `modules/auth/main` | `module add` |
 
-### Checking pinned versions
-
-```bash
-# Read the SHA pinned in main's tree, resolve to tag
-mono module version modules/auth
-# → modules/auth/v1.2.0 (abc123...)
-
-mono module version auth
-# → modules/auth/v1.2.0 (abc123...)
-
-# If the pinned SHA has no tag:
-mono module version auth
-# → abc123... (no tag)
-```
-
-### Config
+## Clone workflow
 
 ```bash
-mono config mono.roots modules,libs
-mono config mono.default-root libs
-mono config mono.base develop          # change base branch
-mono config mono.base                  # read current base
-mono config --root-list                # modules libs
-mono config --default-root             # libs
+git clone <url>
+cd repo
+git submodule update --init --recursive
+
+# Tags resolve because they were pushed as annotated tags
+git tag -l                        # shows modules/auth/v1.2.0
+git rev-parse modules/auth/v1.2.0 # resolves to commit SHA
+
+# Mono commands regenerate alternates on first use
+mono module version modules/auth  # auto-runs _setup_alternates
 ```
 
-### Listing modules
-
-```bash
-mono module
-# → submodule.modules/auth.path
-# → submodule.libs/strutils.path
-```
-
-## Files
-
-| File | Purpose |
-|---|---|
-| `.gitmono` | mono config (git config format, `[mono]` section) |
-| `.gitmodules` | Standard Git submodule declarations |
-| `<root>/<name>/` | Per-root submodule working directories |
-
-## Cloning a mono repo
-
-When cloning a mono-managed repo, alternates files are not preserved (they're in `.git/`, not tracked). After `git clone` + `git submodule update --init`:
-
-```bash
-# Regenerate alternates for all modules:
-mono module tag auth v1.0.0   # auto-runs _setup_alternates before tagging
-mono module version auth      # auto-runs _setup_alternates before resolving
-```
-
-Alternates are auto-regenerated on first `tag` or `version` command. For batch restoration, re-tag or re-version each module.
-
-## Backward compatibility
-
-Old `.gitmono` files with `mono.prefix` still work. The old `prefix` is treated as a single root and used as the default root. No migration needed.
-
-## Manual removal
-
-```bash
-git submodule deinit -f <root>/<name>
-git rm -f <root>/<name>
-rm -rf .git/modules/<root>/<name>
-git branch -D <root>/<name>/main
-git tag -d <root>/<name>/root
-git push origin --delete <root>/<name>/main 2>/dev/null || true
-git push origin --delete <root>/<name>/root 2>/dev/null || true
-```
-
-## Under the hood: how tags cross module boundaries
-
-Annotated tags created by `mono module tag` are stored at the parent level:
-
-```
-.git/refs/tags/modules/auth/v1.2.0
-```
-
-This is possible because of the alternates setup on `module add`. Without alternates, `git tag modules/auth/v1.2.0 <sha>` would fail with `fatal: bad object` — the commit object exists only in the submodule's object store.
-
-The alternates files use **relative paths**, so they survive most directory moves. They must be regenerated after `git clone` (handled automatically on next `tag`/`version` command).
+After push + clone, tag objects and commit objects are transferred via the remote. The parent-level tags resolve without alternates. Mono commands regenerate alternates lazily on first `tag` or `version` call.
 
 ## Requirements
 
-- git (any modern version, tested on 2.54+)
-- bash
-
-## License
-
-MIT
+- Git 2.30+
+- Bash 4+

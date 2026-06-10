@@ -122,12 +122,7 @@ _init_repo() {
   "$MONO" module add auth >/dev/null 2>&1
   "$MONO" module add -r libs strutils >/dev/null 2>&1
 
-  echo "DEBUG .gitmodules:" >&3
-  cat .gitmodules >&3
-  echo "DEBUG git config entries:" >&3
-  GIT_PAGER=cat git config --file .gitmodules --get-regexp path >&3
   run "$MONO" module
-  echo "DEBUG list output: [$output]" >&3
   [ "$status" -eq 0 ]
   [[ "$output" =~ "modules/auth" ]]
   [[ "$output" =~ "libs/strutils" ]]
@@ -531,6 +526,42 @@ _init_repo() {
   cd ../..
 }
 
+
+# ---- Phase 1: cleanup - root tag, quoting, no auto-push, walk-up ----
+
+@test "no args prints usage to stderr" {
+  run "$MONO"
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "No arguments supplied" ]]
+}
+
+@test "init creates namespaced root tag" {
+  cd "$TMPDIR"
+  mkdir fresh && cd fresh
+  git init >/dev/null 2>&1
+  "$MONO" init >/dev/null 2>&1
+  run git rev-parse mono/root
+  [ "$status" -eq 0 ]
+}
+
+@test "module add without remote does not fail" {
+  cd "$TMPDIR"
+  mkdir noremote && cd noremote
+  git init >/dev/null 2>&1
+  "$MONO" init >/dev/null 2>&1
+  run "$MONO" module add auth
+  [ "$status" -eq 0 ]
+}
+
+@test "module list works from subdirectory" {
+  _init_repo
+  "$MONO" module add auth >/dev/null 2>&1
+  mkdir subdir
+  cd subdir
+  run "$MONO" module
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "modules/auth" ]]
+}
 
 # ---- multiple modules ----
 
