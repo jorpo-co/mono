@@ -491,6 +491,67 @@ mono_setup () {
   done
 }
 
+# ---- push ----
+
+_usage_push () {
+  echo "Usage: mono push" >&2
+}
+
+mono_push () {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h)
+        _usage_push
+        return 0
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+
+  local top
+  top=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    echo "Error: not inside a git repository." >&2
+    return 1
+  }
+  cd "$top"
+
+  # Push base branch
+  local base
+  base=$(mono_config "$config_group.base" 2>/dev/null) || base=main
+  if git push origin "$base" 2>/dev/null; then
+    echo "Pushed $base"
+  else
+    echo "Warning: could not push $base" >&2
+  fi
+
+  # Push all module orphan branches
+  if [[ -f .gitmodules ]]; then
+    local paths
+    paths=$(git --no-pager config --file .gitmodules --get-regexp path | awk '{print $2}')
+    local path
+    for path in $paths; do
+      local root="${path%%/*}"
+      local name="${path#*/}"
+      local branch
+      branch=$(_get_module_branch_name "$name" "$root")
+      if git push origin "$branch:$branch" 2>/dev/null; then
+        echo "Pushed $branch"
+      else
+        echo "Warning: could not push $branch" >&2
+      fi
+    done
+  fi
+
+  # Push all tags
+  if git push origin --tags 2>/dev/null; then
+    echo "Pushed tags"
+  else
+    echo "Warning: could not push tags" >&2
+  fi
+}
+
 # ---- module resolution ----
 
 # Resolve a module spec into root, name, and path variables.
@@ -722,6 +783,9 @@ main () {
     ;;
     setup)
       mono_setup "$@"
+    ;;
+    push)
+      mono_push "$@"
     ;;
   esac
 }

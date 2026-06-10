@@ -14,6 +14,7 @@ No separate remotes. No multi-repo orchestration. One repo, many module branches
   - [`init`](#init)
   - [`clone`](#clone)
   - [`setup`](#setup)
+  - [`push`](#push)
   - [`config`](#config)
   - [`module` (list)](#module-list)
   - [`module add`](#module-add)
@@ -171,6 +172,21 @@ For each registered module:
 2. Switches the submodule from detached HEAD to its tracked branch
 
 Run this after `git clone --recurse-submodules` to skip the submodule fetch. Also run it after any `git pull` that updates submodule pointers — it's a no-op if nothing changed.
+
+### `push`
+
+Push everything — main, all module branches, and all tags.
+
+```
+mono push
+```
+
+Pushes:
+1. The base branch (usually `main`)
+2. Every module's orphan branch (`<root>/<name>/main`)
+3. All tags (including module version tags)
+
+One command, no forgotten branches. Prevents the common monorepo pitfall: pushing main but forgetting to push submodule branches, leaving the next clone with broken submodule pointers.
 
 ### `config`
 

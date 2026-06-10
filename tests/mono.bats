@@ -705,6 +705,78 @@ _init_repo() {
   [[ "$output" =~ "modules/auth/main" ]]
 }
 
+# ---- push ----
+
+@test "push --help prints usage" {
+  _init_repo
+  run "$MONO" push --help
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Usage:" ]]
+}
+
+@test "push with no modules pushes main" {
+  cd "$TMPDIR"
+  rm -rf source
+  git init --bare source.git >/dev/null 2>&1
+  git clone source.git work >/dev/null 2>&1
+  cd work
+  "$MONO" init >/dev/null 2>&1
+
+  # Make a commit so push has something to send
+  echo "readme" > README.md
+  git add README.md
+  git commit -m "init" >/dev/null 2>&1
+
+  run "$MONO" push
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "main" ]]
+}
+
+@test "push pushes main, module branches, and tags" {
+  cd "$TMPDIR"
+  rm -rf source
+  git init --bare source.git >/dev/null 2>&1
+  git clone source.git source >/dev/null 2>&1
+  cd source
+  "$MONO" init >/dev/null 2>&1
+  "$MONO" module add auth >/dev/null 2>&1
+  cd modules/auth
+  echo "data" > x.txt
+  git add x.txt
+  git commit -m "feat" >/dev/null 2>&1
+  cd ../..
+  "$MONO" module tag modules/auth v1.0.0 >/dev/null 2>&1
+
+  run "$MONO" push
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "main" ]]
+  [[ "$output" =~ "modules/auth/main" ]]
+  [[ "$output" =~ "modules/auth/v1.0.0" ]]
+
+  # Verify on the remote
+  run git ls-remote origin refs/heads/main
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "refs/heads/main" ]]
+
+  run git ls-remote origin refs/heads/modules/auth/main
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "refs/heads/modules/auth/main" ]]
+
+  run git ls-remote origin refs/tags/modules/auth/v1.0.0
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "refs/tags/modules/auth/v1.0.0" ]]
+}
+
+@test "push without origin warns but exits 0" {
+  cd "$TMPDIR"
+  mkdir noremote && cd noremote
+  git init >/dev/null 2>&1
+  "$MONO" init >/dev/null 2>&1
+  run "$MONO" push
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Warning" ]]
+}
+
 # ---- Phase 1: cleanup - root tag, quoting, no auto-push, walk-up ----
 
 @test "no args prints usage to stderr" {
