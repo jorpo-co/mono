@@ -623,7 +623,7 @@ _init_repo() {
   rm -rf fresh
   git clone source.git fresh >/dev/null 2>&1
   cd fresh
-  git submodule pin --init --recursive >/dev/null 2>&1
+  git submodule update --init --recursive >/dev/null 2>&1
 
   # Verify detached HEAD before setup
   cd modules/auth
@@ -664,7 +664,7 @@ _init_repo() {
   rm -rf fresh
   git clone source.git fresh >/dev/null 2>&1
   cd fresh
-  git submodule pin --init --recursive >/dev/null 2>&1
+  git submodule update --init --recursive >/dev/null 2>&1
 
   # Run setup twice
   "$MONO" setup >/dev/null 2>&1
@@ -784,6 +784,100 @@ _init_repo() {
 
 # ---- module tag --pin ----
 
+# ---- module add --branch ----
+
+@test "module add --branch registers submodule from existing branch" {
+  _init_repo
+  # Create an orphan branch manually (simulating subtree split)
+  git checkout --orphan services/auth/main v0.0.0
+  echo "auth code" > main.go
+  git add main.go
+  git commit -m "feat: initial" >/dev/null 2>&1
+  git checkout main 2>/dev/null
+
+  run "$MONO" module add auth --branch services/auth/main
+  [ "$status" -eq 0 ]
+
+  # Submodule registered
+  run git config --file .gitmodules --get submodule.modules/auth.path
+  [ "$output" = "modules/auth" ]
+
+  # Branch preserved (not a fresh orphan)
+  run git log --oneline services/auth/main
+  [[ "$output" =~ "feat: initial" ]]
+
+  # Root tag created on the branch HEAD
+  run git show-ref --verify refs/tags/modules/auth/v0.0.0
+  [ "$status" -eq 0 ]
+}
+
+@test "module add --branch with non-existent branch fails" {
+  _init_repo
+  run "$MONO" module add auth --branch nonexistent/branch
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "not found" ]]
+}
+
+# ---- module split ----
+
+@test "split --help prints usage" {
+  _init_repo
+  run "$MONO" module split --help
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Usage:" ]]
+}
+
+@test "split with no path fails" {
+  _init_repo
+  run "$MONO" module split
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "Usage:" ]]
+}
+
+@test "split converts folder into submodule preserving history" {
+  cd "$TMPDIR"
+  rm -rf source
+  git init --bare source.git >/dev/null 2>&1
+  git clone source.git work >/dev/null 2>&1
+  cd work
+  "$MONO" init --roots modules,services >/dev/null 2>&1
+
+  # Create a folder with history in main
+  mkdir -p services/auth
+  echo "v1" > services/auth/main.go
+  git add services/auth
+  git commit -m "add auth service" >/dev/null 2>&1
+
+  echo "v2" > services/auth/main.go
+  git add services/auth
+  git commit -m "auth: add feature" >/dev/null 2>&1
+
+  run "$MONO" module split services/auth
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Split" ]]
+
+  # Branch exists with history
+  run git log --oneline services/auth/main
+  [[ "$output" =~ "auth: add feature" ]]
+  [[ "$output" =~ "add auth service" ]]
+
+  # Folder is now a submodule
+  [ -f services/auth/.gitmodules ] || [ -f services/auth/.git ]
+
+  # Files preserved
+  [ -f services/auth/main.go ]
+
+  # .gitmodules has entry
+  run git config --file .gitmodules --get submodule.services/auth.path
+  [ "$output" = "services/auth" ]
+
+  # Submodule folder no longer tracked directly in main
+  run git ls-tree HEAD services/auth
+  [[ "$output" =~ "160000" ]]
+}
+
+
+
 @test "tag --pin tags AND updates parent gitlink" {
   _init_repo
   "$MONO" module add auth >/dev/null 2>&1
@@ -818,14 +912,14 @@ _init_repo() {
 
 # ---- module pin ----
 
-@test "update --help prints usage" {
+@test "pin --help prints usage" {
   _init_repo
   run "$MONO" module pin --help
   [ "$status" -eq 0 ]
   [[ "$output" =~ "Usage:" ]]
 }
 
-@test "update without version pins parent to submodule HEAD" {
+@test "pin without version pins parent to submodule HEAD" {
   _init_repo
   "$MONO" module add auth >/dev/null 2>&1
   OLD_SHA=$(git ls-tree HEAD modules/auth | awk '{print $3}')
@@ -847,7 +941,7 @@ _init_repo() {
   [[ ! "$output" =~ "$OLD_SHA" ]]
 }
 
-@test "update with version pins parent to that tag" {
+@test "pin with version pins parent to that tag" {
   _init_repo
   "$MONO" module add auth >/dev/null 2>&1
   OLD_SHA=$(git ls-tree HEAD modules/auth | awk '{print $3}')
@@ -872,13 +966,13 @@ _init_repo() {
   [[ "$output" =~ "$SHA" ]]
 }
 
-@test "update on non-existent module fails" {
+@test "pin on non-existent module fails" {
   _init_repo
   run "$MONO" module pin modules/auth
   [ "$status" -ne 0 ]
 }
 
-@test "update with no name fails" {
+@test "pin with no name fails" {
   _init_repo
   run "$MONO" module pin
   [ "$status" -eq 1 ]

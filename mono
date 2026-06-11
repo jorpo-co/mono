@@ -236,8 +236,13 @@ _setup_alternates () {
 _create_real_module () {
   local name=$1
   local root=${2:-$(_get_default_root)}
+  local existing_branch=${3:-}
   local branch
-  branch=$(_get_module_branch_name "$name" "$root")
+  if [[ -n "$existing_branch" ]]; then
+    branch="$existing_branch"
+  else
+    branch=$(_get_module_branch_name "$name" "$root")
+  fi
   local path
   path=$(_get_module_path "$name" "$root")
   git submodule add -b "$branch" ./ "./$path"
@@ -250,17 +255,31 @@ _create_real_module () {
 _create_module () {
   local name=$1
   local root=${2:-$(_get_default_root)}
+  local existing_branch=${3:-}
   local branch
-  branch=$(_get_module_branch_name "$name" "$root")
+  if [[ -n "$existing_branch" ]]; then
+    branch="$existing_branch"
+  else
+    branch=$(_get_module_branch_name "$name" "$root")
+  fi
   local path
   path=$(_get_module_path "$name" "$root")
 
-  if _has_branch "$branch"; then
-    echo "Error: module '$name' already exists in root '$root'" >&2
-    return 1
+  if [[ -z "$existing_branch" ]]; then
+    if _has_branch "$branch"; then
+      echo "Error: module '$name' already exists in root '$root'" >&2
+      return 1
+    fi
+    _create_module_branch "$name" "$root"
+  else
+    if ! _has_branch "$branch"; then
+      echo "Error: branch '$branch' not found" >&2
+      return 1
+    fi
+    local sha
+    sha=$(git rev-parse "$branch")
+    git tag "$root/$name/$root_tag" "$sha" -m "Module root" 2>/dev/null
   fi
-
-  _create_module_branch "$name" "$root"
 
   # Push orphan branch to origin so submodule clone (via ./ URL) can find it.
   # Silent if no origin configured, warns on other failures.
@@ -269,7 +288,7 @@ _create_module () {
   fi
 
   git checkout "$(mono_config "$config_group.base")"
-  _create_real_module "$name" "$root"
+  _create_real_module "$name" "$root" "$existing_branch"
   _setup_alternates "$name" "$root"
 
   # Commit submodule reference to main so it's durable
@@ -289,8 +308,8 @@ _usage_init () {
 }
 
 _usage_module_add () {
-  echo "Usage: mono module add [-r <root>] <name>" >&2
-  echo "       mono module add <root>/<name>" >&2
+  echo "Usage: mono module add [-r <root>] [--branch <branch>] <name>" >&2
+  echo "       mono module add <root>/<name> [--branch <branch>]" >&2
 }
 
 _usage_module_tag () {
@@ -383,6 +402,71 @@ mono_module_pin () {
 }
 
 
+# ---- module split ----
+
+_usage_module_split () {
+  echo "Usage: mono module split <path>" >&2
+  echo "       mono module split <root>/<name>" >&2
+}
+
+mono_module_split () {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h)
+        _usage_module_split
+        return 0
+        ;;
+      *)
+        if [[ -z "$input_path" ]]; then
+          input_path="$1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$input_path" ]]; then
+    _usage_module_split
+    return 1
+  fi
+
+  local root="${input_path%%/*}"
+  local name="${input_path#*/}"
+
+  if [[ "$root" == "$name" ]]; then
+    echo "Error: path must contain a root and name (e.g. services/auth)" >&2
+    return 1
+  fi
+
+  _validate_root "$root" || {
+    echo "Error: '$root' is not a configured root. Roots: $(_get_root_list)" >&2
+    return 1
+  }
+
+  if [[ ! -d "$input_path" ]]; then
+    echo "Error: '$input_path' does not exist in the working tree" >&2
+    return 1
+  fi
+
+  local branch="$input_path/$(_get_base_branch)"
+
+  # Split folder history into orphan branch
+  if ! git subtree split --prefix="$input_path" -b "$branch" 2>/dev/null; then
+    echo "Error: failed to split '$input_path'. Ensure the path has commit history and 'git subtree' is available." >&2
+    return 1
+  fi
+
+  # Remove folder from main
+  git rm -rf "$input_path" >/dev/null 2>&1
+  git commit -m "extract $input_path into submodule" >/dev/null 2>&1
+
+  # Register as mono module using existing branch
+  _create_module "$name" "$root" "$branch"
+
+  echo "Split $input_path into submodule, branch: $branch"
+}
+
+
 mono_init () {
   _has_commits && return
 
@@ -443,11 +527,16 @@ mono_config_default_root () {
 mono_module_add () {
   local name=""
   local flag_root=""
+  local flag_branch=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --root|-r)
         flag_root="$2"
+        shift 2
+        ;;
+      --branch|-b)
+        flag_branch="$2"
         shift 2
         ;;
       --help|-h)
@@ -474,7 +563,7 @@ mono_module_add () {
     return 1
   }
 
-  _create_module "$name" "$root"
+  _create_module "$name" "$root" "$flag_branch"
 }
 
 mono_module_remove () {
@@ -513,7 +602,7 @@ mono_clone () {
   fi
 
   # Initialize and check out all submodules
-  git submodule pin --init --recursive
+  git submodule update --init --recursive
 
   # Delegate to setup for alternates + branch checkout
   mono_setup
@@ -836,8 +925,11 @@ mono_module () {
     tag)
       mono_module_tag "$@"
     ;;
-    update)
+    pin)
       mono_module_pin "$@"
+    ;;
+    split)
+      mono_module_split "$@"
     ;;
     version)
       mono_module_version "$@"

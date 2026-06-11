@@ -218,19 +218,39 @@ Create a new module — orphan branch + submodule + alternates.
 ```
 mono module add [-r <root>] <name>
 mono module add <root>/<name>
+mono module add [--branch <branch>] <name>
 ```
 
-Creates:
+Without `--branch`:
 - Orphan branch `<root>/<name>/main` starting from `v0.0.0` tag
-- Root tag `<root>/<name>/root`
+- Root tag `<root>/<name>/v0.0.0`
 - Submodule at `<root>/<name>/`
 - Bidirectional alternates for object sharing
 - Commit on main recording the submodule addition
+
+With `--branch`: registers an existing branch as a module instead of creating a fresh orphan. Skips branch creation, tags the existing branch HEAD as `<root>/<name>/v0.0.0`. Used internally by `mono module split`.
 
 **Errors:**
 - Module already exists (branch conflict)
 - Root not configured
 - Ambiguous: `-r` flag AND path both given
+
+### `module split`
+
+Convert a folder into a submodule, preserving its git history.
+
+```
+mono module split <root>/<name>
+mono module split services/auth
+```
+
+Does four things:
+1. `git subtree split --prefix=<path>` — extracts folder history into an orphan branch (`services/auth/main`)
+2. `git rm -rf <path>` — removes folder from main's tree
+3. Commits the removal
+4. Registers the branch as a mono module (equivalent to `mono module add --branch <name>`)
+
+Requires `git subtree` (included with git 2.30+) and the root must already be configured in `.gitmono`.
 
 ### `module tag`
 
