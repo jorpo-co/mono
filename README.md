@@ -19,6 +19,7 @@ No separate remotes. No multi-repo orchestration. One repo, many module branches
   - [`module` (list)](#module-list)
   - [`module add`](#module-add)
   - [`module tag`](#module-tag)
+  - [`module pin`](#module-pin)
   - [`module version`](#module-version)
   - [`module remove`](#module-remove)
 - [Module specification (three forms)](#module-specification-three-forms)
@@ -233,26 +234,49 @@ Creates:
 
 ### `module tag`
 
-Tag a module's current HEAD, update parent branch ref, pin in main.
+Tag a module's current HEAD. Does NOT update the parent's submodule reference.
 
 ```
-mono module tag [-r <root>] <name> <semver>
-mono module tag <root>/<name> <semver>
+mono module tag [-r <root>] [--pin] <name> <semver>
+mono module tag [--pin] <root>/<name> <semver>
 ```
 
 1. Reads submodule HEAD SHA (via `--git-dir`)
 2. Updates parent branch ref: `refs/heads/<root>/<name>/main` = SHA
 3. Creates annotated parent-level tag: `<root>/<name>/v<semver>`
-4. Pins submodule reference in main's tree and commits
 
-Version is normalized — leading `v` is stripped then re-added. Both `v1.2.0` and `1.2.0` produce tag `<root>/<name>/v1.2.0`.
+Tags are created in the parent's namespace (same repo, not per-submodule). The parent's gitlink (the pinned SHA in main's tree) is NOT changed — the parent stays at whatever version it was pinned to before.
 
-**Requires:** alternates (auto-setup on `module add`). If the module was added before this feature, alternates are regenerated automatically.
+Use `--pin` (or `-p`) to also update the parent's gitlink and commit in one step:
 
-**Errors:**
-- Module not found (not added via `module add`)
-- Root not configured or invalid
-- Ambiguous: `-r` flag AND path both given
+```
+mono module tag --pin auth v1.2.0      # tag + pin parent to v1.2.0
+```
+
+This is equivalent to `mono module tag auth v1.2.0` followed by `mono module pin auth v1.2.0`.
+
+### `module pin`
+
+Pin the parent's submodule reference to a tagged version or current HEAD.
+
+```
+mono module pin [-r <root>] <name> [<version>]
+mono module pin <root>/<name> [<version>]
+```
+
+Updates the parent's gitlink (the SHA recorded in main's tree for the submodule) and commits. Use this to deliberately bump the dependency version after verifying compatibility.
+
+With a version: pins to that specific tag's commit:
+
+```
+mono module pin auth v1.2.0       # pin to tag modules/auth/v1.2.0
+```
+
+Without a version: pins to the submodule's current HEAD:
+
+```
+mono module pin auth              # pin to whatever HEAD is now
+```
 
 ### `module version`
 

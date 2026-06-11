@@ -261,9 +261,12 @@ _init_repo() {
 
 # ---- module tag ----
 
-@test "module tag creates annotated parent-level tag" {
+@test "module tag creates annotated parent-level tag without pinning parent" {
   _init_repo
   "$MONO" module add auth >/dev/null 2>&1
+
+  # Capture SHA pinned by module add
+  OLD_SHA=$(git ls-tree HEAD modules/auth | awk '{print $3}')
 
   # commit in submodule
   cd modules/auth
@@ -289,9 +292,10 @@ _init_repo() {
   run git rev-parse modules/auth/main
   [ "$output" = "$SHA" ]
 
-  # pinned in main tree
+  # Parent gitlink is NOT updated — still points to OLD_SHA
   run git ls-tree HEAD modules/auth
-  [[ "$output" =~ "$SHA" ]]
+  [[ "$output" =~ "$OLD_SHA" ]]
+  [[ ! "$output" =~ "$SHA" ]]
 }
 
 @test "module tag with explicit root path" {
@@ -384,7 +388,7 @@ _init_repo() {
   SHA=$(git rev-parse HEAD)
   cd ../..
 
-  "$MONO" module tag modules/auth v1.0.0 >/dev/null 2>&1
+  "$MONO" module tag --pin modules/auth v1.0.0 >/dev/null 2>&1
 
   run "$MONO" module version modules/auth
   [ "$status" -eq 0 ]
@@ -396,15 +400,14 @@ _init_repo() {
   _init_repo
   "$MONO" module add auth >/dev/null 2>&1
 
-  # commit but don't tag
+  # commit in submodule then update parent (no tag)
   cd modules/auth
   echo "data" > x.txt
   git add x.txt
   git commit -m "new" >/dev/null 2>&1
   SHA=$(git rev-parse HEAD)
   cd ../..
-  git add modules/auth
-  git commit -m "update" >/dev/null 2>&1
+  "$MONO" module pin modules/auth >/dev/null 2>&1
 
   run "$MONO" module version modules/auth
   [ "$status" -eq 0 ]
@@ -435,10 +438,10 @@ _init_repo() {
   git commit -m "new" >/dev/null 2>&1
   SHA=$(git rev-parse HEAD)
   cd ../..
-  git add modules/auth
-  git commit -m "update" >/dev/null 2>&1
+  "$MONO" module pin modules/auth >/dev/null 2>&1
   run "$MONO" module version auth
   [ "$status" -eq 0 ]
+  [[ "$output" =~ "$SHA" ]]
   [[ "$output" =~ "no tag" ]]
 }
 
@@ -466,7 +469,7 @@ _init_repo() {
   [ "$status" -eq 0 ]
 }
 
-@test "full lifecycle: init, add, work, tag, version" {
+@test "full lifecycle: init, add, work, tag, update, version" {
   _init_repo
   "$MONO" module add auth >/dev/null 2>&1
 
@@ -477,6 +480,7 @@ _init_repo() {
   cd ../..
 
   "$MONO" module tag modules/auth v1.0.0 >/dev/null 2>&1
+  "$MONO" module pin modules/auth v1.0.0 >/dev/null 2>&1
 
   run "$MONO" module version modules/auth
   [ "$status" -eq 0 ]
@@ -556,6 +560,7 @@ _init_repo() {
   git commit -m "feat" >/dev/null 2>&1
   cd ../..
   "$MONO" module tag modules/auth v1.0.0 >/dev/null 2>&1
+  "$MONO" module pin modules/auth v1.0.0 >/dev/null 2>&1
 
   # Push everything
   git push origin main 2>/dev/null
@@ -618,7 +623,7 @@ _init_repo() {
   rm -rf fresh
   git clone source.git fresh >/dev/null 2>&1
   cd fresh
-  git submodule update --init --recursive >/dev/null 2>&1
+  git submodule pin --init --recursive >/dev/null 2>&1
 
   # Verify detached HEAD before setup
   cd modules/auth
@@ -659,7 +664,7 @@ _init_repo() {
   rm -rf fresh
   git clone source.git fresh >/dev/null 2>&1
   cd fresh
-  git submodule update --init --recursive >/dev/null 2>&1
+  git submodule pin --init --recursive >/dev/null 2>&1
 
   # Run setup twice
   "$MONO" setup >/dev/null 2>&1
@@ -775,6 +780,109 @@ _init_repo() {
   run "$MONO" push
   [ "$status" -eq 0 ]
   [[ "$output" =~ "Warning" ]]
+}
+
+# ---- module tag --pin ----
+
+@test "tag --pin tags AND updates parent gitlink" {
+  _init_repo
+  "$MONO" module add auth >/dev/null 2>&1
+
+  cd modules/auth
+  echo "data" > x.txt
+  git add x.txt
+  git commit -m "new" >/dev/null 2>&1
+  SHA=$(git rev-parse HEAD)
+  cd ../..
+
+  run "$MONO" module tag --pin modules/auth v1.0.0
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Tagged" ]]
+  [[ "$output" =~ "pinned" ]]
+
+  # Tag exists
+  run git rev-parse modules/auth/v1.0.0^{commit}
+  [ "$output" = "$SHA" ]
+
+  # Parent gitlink IS updated
+  run git ls-tree HEAD modules/auth
+  [[ "$output" =~ "$SHA" ]]
+}
+
+@test "tag --pin with ambiguous -r and path fails" {
+  _init_repo
+  run "$MONO" module tag --pin -r modules modules/auth v1.0.0
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "ambiguous" ]]
+}
+
+# ---- module pin ----
+
+@test "update --help prints usage" {
+  _init_repo
+  run "$MONO" module pin --help
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Usage:" ]]
+}
+
+@test "update without version pins parent to submodule HEAD" {
+  _init_repo
+  "$MONO" module add auth >/dev/null 2>&1
+  OLD_SHA=$(git ls-tree HEAD modules/auth | awk '{print $3}')
+
+  cd modules/auth
+  echo "data" > x.txt
+  git add x.txt
+  git commit -m "new" >/dev/null 2>&1
+  NEW_SHA=$(git rev-parse HEAD)
+  cd ../..
+
+  run "$MONO" module pin modules/auth
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "updated" ]]
+
+  # Parent gitlink now points to NEW_SHA
+  run git ls-tree HEAD modules/auth
+  [[ "$output" =~ "$NEW_SHA" ]]
+  [[ ! "$output" =~ "$OLD_SHA" ]]
+}
+
+@test "update with version pins parent to that tag" {
+  _init_repo
+  "$MONO" module add auth >/dev/null 2>&1
+  OLD_SHA=$(git ls-tree HEAD modules/auth | awk '{print $3}')
+
+  cd modules/auth
+  echo "data" > x.txt
+  git add x.txt
+  git commit -m "new" >/dev/null 2>&1
+  SHA=$(git rev-parse HEAD)
+  cd ../..
+
+  # Tag first (no pin)
+  "$MONO" module tag modules/auth v1.0.0 >/dev/null 2>&1
+
+  # Now update to that tag
+  run "$MONO" module pin modules/auth v1.0.0
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "updated" ]]
+
+  # Parent gitlink points to tagged SHA
+  run git ls-tree HEAD modules/auth
+  [[ "$output" =~ "$SHA" ]]
+}
+
+@test "update on non-existent module fails" {
+  _init_repo
+  run "$MONO" module pin modules/auth
+  [ "$status" -ne 0 ]
+}
+
+@test "update with no name fails" {
+  _init_repo
+  run "$MONO" module pin
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "Usage:" ]]
 }
 
 # ---- Phase 1: cleanup - root tag, quoting, no auto-push, walk-up ----

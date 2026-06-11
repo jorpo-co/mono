@@ -294,13 +294,92 @@ _usage_module_add () {
 }
 
 _usage_module_tag () {
-  echo "Usage: mono module tag [-r <root>] <name> <semver>" >&2
-  echo "       mono module tag <root>/<name> <semver>" >&2
+  echo "Usage: mono module tag [-r <root>] [--pin|-p] <name> <semver>" >&2
+  echo "       mono module tag [--pin|-p] <root>/<name> <semver>" >&2
 }
 
 _usage_module_version () {
   echo "Usage: mono module version [-r <root>] <name>" >&2
   echo "       mono module version <root>/<name>" >&2
+}
+
+# ---- module pin ----
+
+_usage_module_pin () {
+  echo "Usage: mono module pin [-r <root>] <name> [<version>]" >&2
+  echo "       mono module pin <root>/<name> [<version>]" >&2
+}
+
+mono_module_pin () {
+  local input_name=""
+  local input_version=""
+  local flag_root=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --root|-r)
+        flag_root="$2"
+        shift 2
+        ;;
+      --help|-h)
+        _usage_module_pin
+        return 0
+        ;;
+      *)
+        if [[ -z "$input_name" ]]; then
+          input_name="$1"
+        elif [[ -z "$input_version" ]]; then
+          input_version="$1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$input_name" ]]; then
+    _usage_module_pin
+    return 1
+  fi
+
+  local root name path
+  _resolve_module "$input_name" "$flag_root" || return 1
+
+  _validate_root "$root" || {
+    echo "Error: '$root' is not a configured root. Roots: $(_get_root_list)" >&2
+    return 1
+  }
+
+  local sub_git=".git/modules/$path"
+  if [[ ! -d "$sub_git" ]]; then
+    echo "Error: module '$name' not found in root '$root'. Add it first with 'mono module add'." >&2
+    return 1
+  fi
+
+  local sha=""
+  local label=""
+
+  if [[ -n "$input_version" ]]; then
+    local clean_version="${input_version#v}"
+    local tag="$root/$name/v$clean_version"
+    sha=$(git rev-parse "$tag^{commit}" 2>/dev/null) || {
+      echo "Error: tag '$tag' not found. Tag the module first with 'mono module tag'." >&2
+      return 1
+    }
+    label="$tag"
+  else
+    sha=$(git --git-dir="$sub_git" rev-parse HEAD 2>/dev/null) || {
+      echo "Error: cannot read HEAD of module '$name'" >&2
+      return 1
+    }
+    label="$sha"
+  fi
+
+  _setup_alternates "$name" "$root"
+
+  git add "$path"
+  git commit -m "update $path to $label" >/dev/null 2>&1
+
+  echo "Updated $path to $label ($sha)"
 }
 
 
@@ -434,7 +513,7 @@ mono_clone () {
   fi
 
   # Initialize and check out all submodules
-  git submodule update --init --recursive
+  git submodule pin --init --recursive
 
   # Delegate to setup for alternates + branch checkout
   mono_setup
@@ -590,6 +669,7 @@ mono_module_tag () {
   local name=""
   local version=""
   local flag_root=""
+  local pin=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -597,6 +677,11 @@ mono_module_tag () {
         flag_root="$2"
         shift 2
         ;;
+      --pin|-p)
+        pin=1
+        shift
+        ;;
+
       --help|-h)
         _usage_module_tag
         return 0
@@ -654,10 +739,16 @@ mono_module_tag () {
     return 1
   fi
 
-  git add "$path"
-  git commit -m "update $path to $version"
 
-  echo "Tagged $path as $tag ($sha)"
+  local msg="Tagged $path as $tag ($sha)"
+
+  if [[ "$pin" -eq 1 ]]; then
+    git add "$path"
+    git commit -m "update $path to $version" >/dev/null 2>&1
+    msg="$msg, pinned in parent"
+  fi
+
+  echo "$msg"
 }
 
 mono_module_version () {
@@ -744,6 +835,9 @@ mono_module () {
     ;;
     tag)
       mono_module_tag "$@"
+    ;;
+    update)
+      mono_module_pin "$@"
     ;;
     version)
       mono_module_version "$@"
