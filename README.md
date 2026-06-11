@@ -1,14 +1,174 @@
-# mono — Git Submodule Monorepo Manager
+![mono logo](./brand/logo.svg)
 
-**mono** turns a plain Git repo into a monorepo using **submodules + orphan branches**. Zero deps beyond git.
+You have a codebase with multiple components — an auth service, an API layer, shared libraries, frontends. They need to evolve independently (different teams, different cadences) but deploy together (atomic releases, shared CI). Separate repos give you isolation but make cross-repo changes a multi-PR nightmare. Traditional monorepos give you atomic deploys but lose isolation — `git log` is noise, CI fires on every touch, and AI agents step on each other.
 
-No separate remotes. No multi-repo orchestration. One repo, many module branches, all wired as submodules.
+**mono gives you both.**
+
+Each module lives on its own orphan branch with its own commit history. `git log modules/auth` shows only auth's changes. An agent working in `modules/auth` cannot touch files in `modules/api`. But it's all *one* git repo, so cross-module refactoring is a single commit, deploys are atomic, and `mono push` sends everything — every branch, every tag — in one command.
+
+The parent repo pins exact versions of each module via git submodule pointers. Reproducible builds come for free. No lockfile, no manifest, no orchestration layer. Just git.
+
+### Why mono for human + agent teams
+
+This pattern is especially powerful when humans and AI agents collaborate:
+
+- **Agents work in isolation.** Give each agent its own module. Agent A rebuilds `auth`, Agent B works on `api`. They never touch each other's files. No merge conflicts from concurrent agent edits.
+- **Humans gate the versions.** Agents develop inside their module. Humans review the output, tag a version, and pin it in the parent. The parent stays stable while agents experiment.
+- **Dependency chains are explicit.** `api` depends on `auth` at version X.Y.Z. An agent upgrading `auth` produces a new tag. The `api` agent can adopt it deliberately, not accidentally.
+- **Reproducible by default.** Every parent commit records exactly which module versions it needs. CI, deploy, and local dev all agree.
+
+---
+
+## Quick start
+
+Five commands, thirty seconds:
+
+```bash
+# 1. Create a repo and init
+mkdir my-project && cd my-project
+git init
+./mono init
+
+# 2. Add your first module
+./mono module add auth
+
+# 3. Work inside the module (it's just a git repo)
+cd modules/auth
+echo 'export const auth = () => {}' > index.ts
+git add index.ts && git commit -m "init auth"
+cd ../..
+
+# 4. Tag a release and pin it in the parent
+./mono module tag --pin auth v0.1.0
+# → Tagged modules/auth as modules/auth/v0.1.0, pinned in parent
+
+# 5. Push everything at once
+./mono push
+```
+
+---
+
+## Common workflows
+
+### Adding a module and shipping a change
+
+```bash
+./mono module add auth          # creates orphan branch + submodule
+cd modules/auth                 # work happens here
+git log                         # only auth history
+# ... develop ...
+git commit -m "feat: add login"
+cd ../..
+./mono module tag --pin auth v1.0.0   # tag release + pin parent
+./mono push                           # push everything
+```
+
+### Agent isolation — the killer pattern
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Parent repo (main branch)                          │
+│  ├── modules/auth  → pinned to v1.0.0               │
+│  ├── modules/api   → pinned to v2.1.0               │
+│  ├── modules/web   → pinned to v0.3.0               │
+│                                                     │
+│  Agent A: works in modules/auth                     │
+│  Agent B: works in modules/api                      │
+│  Agent C: works in modules/web                      │
+│  ── No file overlap ── No merge conflicts ──        │
+└─────────────────────────────────────────────────────┘
+```
+
+```bash
+# 1. Clone (anyone on any machine)
+git clone <url>
+cd repo && mono clone
+
+# 2. Agent works on auth module — fully isolated
+cd modules/auth
+# ... agent makes changes ...
+git commit -m "refactor auth"
+cd ../..
+
+# 3. Agent creates a tag (no parent update)
+./mono module tag auth v2.0.0
+
+# 4. Human reviews, pins parent
+./mono module pin auth v2.0.0    # only if it looks good
+git push origin main              # deploy the pinned version
+
+# Meanwhile, Agent B works on api/ — completely independent
+cd modules/api
+# ... agent work ...
+```
+
+### Deploying a stable snapshot
+
+```bash
+# Pin all modules to their latest tags
+./mono module pin auth v1.2.0
+./mono module pin api v2.0.1
+./mono module pin web v0.5.0
+
+# Commit and push
+git commit -m "release: pin all modules"
+./mono push
+
+# Next dev clones and gets exactly these versions
+git clone <url>
+cd repo && mono clone
+```
+
+### Upgrading a shared dependency
+
+```bash
+# Agent upgrades libs/strutils
+cd libs/strutils
+# ... changes ...
+git commit -m "perf: optimize string operations"
+cd ../..
+./mono module tag --pin libs/strutils v0.6.0
+
+# Other modules adopt the new version deliberately
+# No forced breakage — each module pins independently.
+```
+
+### Onboarding a new developer
+
+```bash
+git clone <url> && cd repo
+mono clone          # one command: submodules + alternates + branches
+# Ready to work. Every module at the pinned version.
+```
+
+### Splitting an existing folder into a module
+
+```bash
+# You've been building services/auth in-tree. Time to isolate it.
+./mono module split services/auth
+# → services/auth is now a submodule with full history preserved
+# → main no longer tracks those files directly
+```
+
+### Multi-root project (group modules by type)
+
+```bash
+./mono init --roots services,libraries,tools --default-root services
+
+./mono module add services/auth        # services/auth/
+./mono module add services/api         # services/api/
+./mono module add -r libraries strutils  # libraries/strutils/
+./mono module add tools/build          # tools/build/
+
+# All in one repo. All push together. All clone together.
+```
 
 ---
 
 ## Table of Contents
 
 - [Architecture](#architecture)
+- [Design Rationale](#design-rationale)
 - [Setup](#setup)
 - [Commands](#commands)
   - [`init`](#init)
@@ -18,6 +178,7 @@ No separate remotes. No multi-repo orchestration. One repo, many module branches
   - [`config`](#config)
   - [`module` (list)](#module-list)
   - [`module add`](#module-add)
+  - [`module split`](#module-split)
   - [`module tag`](#module-tag)
   - [`module pin`](#module-pin)
   - [`module version`](#module-version)
@@ -62,6 +223,8 @@ repo/
 **Object sharing.** Parent and submodule share object stores via bidirectional alternates. This lets the parent create annotated tags pointing to submodule commits. Alternates are auto-configured on `module add` and regenerated by `mono clone` / `mono setup`.
 
 **Prefixed refs.** Branches, tags, and directories all use the `<root>/<name>` prefix to avoid collisions between modules.
+
+---
 
 ## Design Rationale
 
@@ -311,6 +474,8 @@ Reads the SHA pinned in main's tree (`git ls-tree HEAD <path>`), resolves it to 
 
 Output: `<tag> (<sha>)` or `<sha> (no tag)` if the pinned commit isn't tagged.
 
+---
+
 ## Module specification (three forms)
 
 All module commands (`add`, `tag`, `version`) accept three forms:
@@ -335,16 +500,18 @@ mono module tag -r libs libs/strutils v1.0.0
 
 The `_resolve_module` helper normalises all three into `root`, `name`, and `path`.
 
+---
+
 ## Tag naming convention
 
-| Kind | Pattern | Example | Created by |
-|---|---|---|---|
 | Kind | Pattern | Example | Created by |
 |---|---|---|---|
 | Root tag | `v0.0.0` | `v0.0.0` | `mono init` |
 | Module root tag | `<root>/<name>/v0.0.0` | `modules/auth/v0.0.0` | `module add` |
 | Module version tag | `<root>/<name>/v<semver>` | `modules/auth/v1.2.0` | `module tag` |
 | Module orphan branch | `<root>/<name>/<base>` | `modules/auth/main` | `module add` |
+
+---
 
 ## Clone workflow
 
@@ -361,6 +528,8 @@ mono setup                        # just alternates + branch checkout
 ```
 
 After push + clone, tag objects and commit objects are transferred via the remote. The parent-level tags resolve without alternates. `mono clone` (or `mono setup`) regenerates alternates for all modules so `tag`, `version`, and other commands work immediately.
+
+---
 
 ## Requirements
 
