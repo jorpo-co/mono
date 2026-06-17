@@ -19,6 +19,54 @@ This pattern is especially powerful when humans and AI agents collaborate:
 
 ---
 
+## Install
+
+One-line install from GitHub:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/jorpo-co/mono/main/install.sh | bash
+```
+
+Or from a specific version:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/jorpo-co/mono/v1.2.3/install.sh | bash
+```
+
+### Options
+
+| Flag | Description |
+|---|---|
+| `--bin-dir DIR` | Binary install directory (default: `/usr/local/bin`) |
+| `--skill-dir DIR` | Skill directory (prompted interactively if omitted) |
+| `--branch NAME` | GitHub branch or tag to download from (default: `main`) |
+| `--local` | Use local files from a clone instead of downloading |
+| `--version` | Print version and exit |
+| `--help` | Show usage message |
+
+### Non-interactive (CI, scripts)
+
+Set environment variables to skip all prompts:
+
+```bash
+SKILL_DIR=~/.agents/skills/mono BIN_DIR=~/.local/bin bash install.sh
+```
+
+Or use flags:
+
+```bash
+bash install.sh --bin-dir ~/.local/bin --skill-dir ~/.agents/skills/mono
+```
+
+### Local install (from clone)
+
+```bash
+git clone https://github.com/jorpo-co/mono && cd mono
+bash install.sh --local
+```
+
+---
+
 ## Quick start
 
 Five commands, thirty seconds:
