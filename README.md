@@ -4,7 +4,7 @@ You have a codebase with multiple components — an auth service, an API layer, 
 
 **mono gives you both.**
 
-Each module lives on its own orphan branch with its own commit history. `git log modules/auth` shows only auth's changes. An agent working in `modules/auth` cannot touch files in `modules/api`. But it's all *one* git repo, so cross-module refactoring is a single commit, deploys are atomic, and `mono push` sends everything — every branch, every tag — in one command.
+Each module lives on its own orphan branch with its own commit history. `cd modules/auth && git log` shows only auth's changes. An agent working in `modules/auth` cannot accidentally touch files in `modules/api` — though the filesystem is shared by convention, not sandboxed. But it's all *one* git repo, so cross-module refactoring is a single commit, deploys are atomic, and `mono push` sends everything — every branch, every tag — in one command.
 
 The parent repo pins exact versions of each module via git submodule pointers. Reproducible builds come for free. No lockfile, no manifest, no orchestration layer. Just git.
 
@@ -40,7 +40,7 @@ cd ../..
 
 # 4. Tag a release and pin it in the parent
 ./mono module tag --pin auth v0.1.0
-# → Tagged modules/auth as modules/auth/v0.1.0, pinned in parent
+# → Tagged modules/auth as modules/auth/v0.1.0 (<sha>), pinned in parent
 
 # 5. Push everything at once
 ./mono push
@@ -182,7 +182,6 @@ mono clone          # one command: submodules + alternates + branches
   - [`module tag`](#module-tag)
   - [`module pin`](#module-pin)
   - [`module version`](#module-version)
-  - [`module remove`](#module-remove)
 - [Module specification (three forms)](#module-specification-three-forms)
 - [Tag naming convention](#tag-naming-convention)
 - [Clone workflow](#clone-workflow)
@@ -247,10 +246,10 @@ Alternates tell the parent object store "if you don't find an object here, look 
 ### Why orphan branches (not shared history)
 
 Each module gets its own orphan branch (`modules/auth/main`) starting from the `v0.0.0` root tag. This means:
-- No shared commit history between modules — `git log modules/auth/main` shows only auth commits
+- No shared commit history between modules — `cd modules/auth && git log` shows only auth commits
 - No merge conflicts between modules — branches diverge from commit 1
 - Modules can be garbage-collected independently
-- `git clone --single-branch modules/auth/main` fetches only that module's history
+- `git clone --single-branch --branch modules/auth/main <url>` fetches only that module's history
 
 ### Why self-referencing URL (`./`)
 
@@ -411,7 +410,7 @@ Does four things:
 1. `git subtree split --prefix=<path>` — extracts folder history into an orphan branch (`services/auth/main`)
 2. `git rm -rf <path>` — removes folder from main's tree
 3. Commits the removal
-4. Registers the branch as a mono module (equivalent to `mono module add --branch <name>`)
+4. Registers the branch as a mono module (equivalent to `mono module add --branch <root>/<name>/<base>`, where `<base>` is the repo's base branch)
 
 Requires `git subtree` (included with git 2.30+) and the root must already be configured in `.gitmono`.
 
@@ -420,8 +419,8 @@ Requires `git subtree` (included with git 2.30+) and the root must already be co
 Tag a module's current HEAD. Does NOT update the parent's submodule reference.
 
 ```
-mono module tag [-r <root>] [--pin] <name> <semver>
-mono module tag [--pin] <root>/<name> <semver>
+mono module tag [-r <root>] [--pin | -p] <name> <semver>
+mono module tag [--pin | -p] <root>/<name> <semver>
 ```
 
 1. Reads submodule HEAD SHA (via `--git-dir`)
@@ -478,7 +477,7 @@ Output: `<tag> (<sha>)` or `<sha> (no tag)` if the pinned commit isn't tagged.
 
 ## Module specification (three forms)
 
-All module commands (`add`, `tag`, `version`) accept three forms:
+All module commands (`add`, `tag`, `pin`, `split`, `version`) accept three forms:
 
 ```bash
 # 1. Bare name → uses default root
