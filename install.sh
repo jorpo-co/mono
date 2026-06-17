@@ -50,13 +50,13 @@ EOF
 
 prompt() {
   printf "%s " "$1" >&2
-  read -r val
+  read -r val < /dev/tty
   printf "%s" "$val"
 }
 
 confirm() {
-  printf "%s [y/N] " "$1"
-  read -r resp
+  printf "%s [y/N] " "$1" >&2
+  read -r resp < /dev/tty
   case "$resp" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
 }
 
