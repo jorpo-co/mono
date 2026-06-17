@@ -103,7 +103,7 @@ echo ""
 # --- detect existing binary (interactive only) ---
 
 interactive=false
-[ -t 0 ] && interactive=true
+[ -t 0 ] || [ -c /dev/tty ] 2>/dev/null && interactive=true
 
 if [ -z "${BIN_DIR:-}" ] && [ "$interactive" = true ]; then
   if command -v mono >/dev/null 2>&1; then
